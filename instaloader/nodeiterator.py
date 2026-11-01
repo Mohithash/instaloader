@@ -7,18 +7,19 @@ from datetime import datetime, timedelta
 from lzma import LZMAError
 from typing import Any, Callable, Dict, Iterable, Iterator, NamedTuple, Optional, Tuple, TypeVar
 
-from .exceptions import AbortDownloadException, InvalidArgumentException, QueryReturnedBadRequestException
+from .exceptions import InvalidArgumentException
 from .instaloadercontext import InstaloaderContext
 
-FrozenNodeIterator = NamedTuple('FrozenNodeIterator',
-                                [('query_hash', str),
-                                 ('query_variables', Dict),
-                                 ('query_referer', Optional[str]),
-                                 ('context_username', Optional[str]),
-                                 ('total_index', int),
-                                 ('best_before', Optional[float]),
-                                 ('remaining_data', Optional[Dict]),
-                                 ('first_node', Optional[Dict])])
+class FrozenNodeIterator(NamedTuple):
+    query_hash: Optional[str]
+    query_variables: Dict
+    query_referer: Optional[str]
+    context_username: Optional[str]
+    total_index: int
+    best_before: Optional[float]
+    remaining_data: Optional[Dict]
+    first_node: Optional[Dict]
+    doc_id: Optional[str]
 FrozenNodeIterator.query_hash.__doc__ = """The GraphQL ``query_hash`` parameter."""
 FrozenNodeIterator.query_variables.__doc__ = """The GraphQL ``query_variables`` parameter."""
 FrozenNodeIterator.query_referer.__doc__ = """The HTTP referer used for the GraphQL query."""
@@ -28,6 +29,7 @@ FrozenNodeIterator.best_before.__doc__ = """Date when parts of the stored nodes 
 FrozenNodeIterator.remaining_data.__doc__ = \
     """The already-retrieved, yet-unprocessed ``edges`` and the ``page_info`` at time of freezing."""
 FrozenNodeIterator.first_node.__doc__ = """Node data of the first item, if an item has been produced."""
+FrozenNodeIterator.doc_id.__doc__ = """The GraphQL ``doc_id`` parameter."""
 
 T = TypeVar('T')
 
@@ -64,21 +66,32 @@ class NodeIterator(Iterator[T]):
     NodeIterators are matching if and only if they have the same magic.
 
     See also :func:`resumable_iteration` for a high-level context manager that handles a resumable iteration.
+
+    .. versionchanged: 4.13
+       Included support for `doc_id`-based queries (using POST method).
+
+    .. versionchanged: 4.16
+       Added `web_api` parameter, see :meth:`InstaloaderContext.doc_id_graphql_query`.
     """
 
-    _graphql_page_length = 50
+    _graphql_page_length = 12
     _shelf_life = timedelta(days=29)
 
     def __init__(self,
                  context: InstaloaderContext,
-                 query_hash: str,
+                 query_hash: Optional[str],
                  edge_extractor: Callable[[Dict[str, Any]], Dict[str, Any]],
                  node_wrapper: Callable[[Dict], T],
                  query_variables: Optional[Dict[str, Any]] = None,
                  query_referer: Optional[str] = None,
-                 first_data: Optional[Dict[str, Any]] = None):
+                 first_data: Optional[Dict[str, Any]] = None,
+                 is_first: Optional[Callable[[T, Optional[T]], bool]] = None,
+                 doc_id: Optional[str] = None,
+                 web_api: bool = False):
         self._context = context
         self._query_hash = query_hash
+        self._doc_id = doc_id
+        self._web_api = web_api
         self._edge_extractor = edge_extractor
         self._node_wrapper = node_wrapper
         self._query_variables = query_variables if query_variables is not None else {}
@@ -91,28 +104,42 @@ class NodeIterator(Iterator[T]):
         else:
             self._data = self._query()
         self._first_node: Optional[Dict] = None
+        self._first_item: Optional[T] = None
+        self._is_first = is_first
 
     def _query(self, after: Optional[str] = None) -> Dict:
-        pagination_variables = {'first': NodeIterator._graphql_page_length}  # type: Dict[str, Any]
+        if self._doc_id is not None:
+            return self._query_doc_id(self._doc_id, after)
+        else:
+            assert self._query_hash is not None
+            return self._query_query_hash(self._query_hash, after)
+
+    def _query_doc_id(self, doc_id: str, after: Optional[str] = None) -> Dict:
+        pagination_variables: Dict[str, Any] = {}
         if after is not None:
             pagination_variables['after'] = after
-        try:
-            data = self._edge_extractor(
-                self._context.graphql_query(
-                    self._query_hash, {**self._query_variables, **pagination_variables}, self._query_referer
-                )
+            pagination_variables['before'] = None
+            pagination_variables['first'] = NodeIterator._graphql_page_length
+            pagination_variables['last'] = None
+        data = self._edge_extractor(
+            self._context.doc_id_graphql_query(
+                doc_id, {**self._query_variables, **pagination_variables}, self._query_referer, self._web_api
             )
-            self._best_before = datetime.now() + NodeIterator._shelf_life
-            return data
-        except QueryReturnedBadRequestException:
-            new_page_length = int(NodeIterator._graphql_page_length / 2)
-            if new_page_length >= 12:
-                NodeIterator._graphql_page_length = new_page_length
-                self._context.error("HTTP Error 400 (Bad Request) on GraphQL Query. Retrying with shorter page length.",
-                                    repeat_at_end=False)
-                return self._query(after)
-            else:
-                raise
+        )
+        self._best_before = datetime.now() + NodeIterator._shelf_life
+        return data
+
+    def _query_query_hash(self, query_hash: str, after: Optional[str] = None) -> Dict:
+        pagination_variables: Dict[str, Any] = {'first': NodeIterator._graphql_page_length}
+        if after is not None:
+            pagination_variables['after'] = after
+        data = self._edge_extractor(
+            self._context.graphql_query(
+                query_hash, {**self._query_variables, **pagination_variables}, self._query_referer
+            )
+        )
+        self._best_before = datetime.now() + NodeIterator._shelf_life
+        return data
 
     def __iter__(self):
         return self
@@ -128,12 +155,16 @@ class NodeIterator(Iterator[T]):
                 self._page_index, self._total_index = page_index, total_index
                 raise
             item = self._node_wrapper(node)
-            if self._first_node is None:
-                self._first_node = node
+            if self._is_first is not None:
+                if self._is_first(item, self.first_item):
+                    self._first_node, self._first_item = node, item
+            else:
+                if self._first_node is None:
+                    self._first_node, self._first_item = node, item
             return item
-        if self._data['page_info']['has_next_page']:
+        if self._data.get('page_info', {}).get('has_next_page'):
             query_response = self._query(self._data['page_info']['end_cursor'])
-            if self._data['edges'] != query_response['edges']:
+            if self._data['edges'] != query_response['edges'] and len(query_response['edges']) > 0:
                 page_index, data = self._page_index, self._data
                 try:
                     self._page_index = 0
@@ -168,9 +199,27 @@ class NodeIterator(Iterator[T]):
         """
         If this iterator has produced any items, returns the first item produced.
 
+        It is possible to override what is considered the first item (for example, to consider the
+        newest item in case items are not in strict chronological order) by passing a callback
+        function as the `is_first` parameter when creating the class.
+
         .. versionadded:: 4.8
+        .. versionchanged:: 4.9.2
+           What is considered the first item can be overridden.
         """
-        return self._node_wrapper(self._first_node) if self._first_node is not None else None
+        if self._first_item is None:
+            # Restore _first_item from _first_node. Needed after thawing, since
+            # FrozenNodeIterator stores the node, not the item.
+            self._first_item = (
+                self._node_wrapper(self._first_node)
+                if self._first_node is not None
+                else None
+            )
+        return self._first_item
+
+    @staticmethod
+    def page_length() -> int:
+        return NodeIterator._graphql_page_length
 
     def freeze(self) -> FrozenNodeIterator:
         """Freeze the iterator for later resuming."""
@@ -187,6 +236,7 @@ class NodeIterator(Iterator[T]):
             best_before=self._best_before.timestamp() if self._best_before else None,
             remaining_data=remaining_data,
             first_node=self._first_node,
+            doc_id=self._doc_id,
         )
 
     def thaw(self, frozen: FrozenNodeIterator) -> None:
@@ -204,7 +254,8 @@ class NodeIterator(Iterator[T]):
         if (self._query_hash != frozen.query_hash or
                 self._query_variables != frozen.query_variables or
                 self._query_referer != frozen.query_referer or
-                self._context.username != frozen.context_username):
+                self._context.username != frozen.context_username or
+                self._doc_id != frozen.doc_id):
             raise InvalidArgumentException("Mismatching resume information.")
         if not frozen.best_before:
             raise InvalidArgumentException("\"best before\" date missing.")
@@ -277,11 +328,11 @@ def resumable_iteration(context: InstaloaderContext,
             is_resuming = True
             start_index = iterator.total_index
             context.log("Resuming from {}.".format(resume_file_path))
-        except (InvalidArgumentException, LZMAError, json.decoder.JSONDecodeError) as exc:
+        except (InvalidArgumentException, LZMAError, json.decoder.JSONDecodeError, EOFError) as exc:
             context.error("Warning: Not resuming from {}: {}".format(resume_file_path, exc))
     try:
         yield is_resuming, start_index
-    except (KeyboardInterrupt, AbortDownloadException):
+    except (Exception, KeyboardInterrupt):
         if os.path.dirname(resume_file_path):
             os.makedirs(os.path.dirname(resume_file_path), exist_ok=True)
         save(iterator.freeze(), resume_file_path)

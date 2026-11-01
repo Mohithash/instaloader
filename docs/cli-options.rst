@@ -26,7 +26,7 @@ Targets
 ^^^^^^^
 
 Specify a list of targets. For each of these, Instaloader creates a folder and
-stores all posts along with the pictures's captions there.
+stores all posts along with the pictures' captions there.
 
 .. include:: basic-usage.rst
    :start-after: targets-start
@@ -61,13 +61,13 @@ What to Download of each Post
 
    Download geotags when available. Geotags are stored as a text file with
    the location's name and a Google Maps link. This requires an additional
-   request to the Instagram server for each picture. Requires :option:`--login`.
+   request to the Instagram server for each picture. Requires :ref:`login<login>`.
 
 .. option:: --comments, -C
 
    Download and update comments for each post. This requires an additional
    request to the Instagram server for each post, which is why it is disabled by
-   default.
+   default. Requires :ref:`login<login>`.
 
 .. option:: --no-captions
 
@@ -116,12 +116,12 @@ What to Download of each Profile
 .. option:: --stories, -s
 
    Also download stories of each profile that is downloaded. Requires
-   :option:`--login`.
+   :ref:`login<login>`.
 
 .. option:: --highlights
 
    Also download highlights of each profile that is downloaded. Requires
-   :option:`--login`.
+   :ref:`login<login>`.
 
    .. versionadded:: 4.1
 
@@ -130,6 +130,12 @@ What to Download of each Profile
    Also download posts where each profile is tagged.
 
    .. versionadded:: 4.1
+
+.. option:: --reels
+
+   Also download Reels videos.
+
+   .. versionadded:: 4.14
 
 .. option:: --igtv
 
@@ -183,6 +189,7 @@ Which Posts to Download
    Do not attempt to download more than COUNT posts.  Applies to
    ``#hashtag``, ``%location_id``, ``:feed``, and ``:saved``.
 
+.. _login:
 
 Login (Download Private Profiles)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -192,9 +199,33 @@ profiles. To login, pass the :option:`--login` option. Your session cookie (not 
 password!) will be saved to a local file to be reused next time you want
 Instaloader to login.
 
+Instead of :option:`--login`, it is possible to use
+:option:`--load-cookies` to import a session from a browser.
+
 .. option:: --login YOUR-USERNAME, -l YOUR-USERNAME
 
    Login name (profile name) for your Instagram account.
+
+.. option:: --load-cookies BROWSER-NAME, -b BROWSER-NAME
+
+   Load Instagram session cookies from a browser instead of using Instaloader's own login mechanism.
+   This method requires the `browser_cookie3 <https://github.com/borisbabic/browser_cookie3>`__ library.
+   By default, cookies are loaded from the browser's main profile, but you can specify a custom cookie file using :option:`--cookiefile`.
+
+   Since :option:`--load-cookies` and :option:`--login` are alternative ways to acquire a session, they cannot be used together when initially acquiring a session.
+
+   Supported browsers: Arc, Brave, Chrome, Chromium, Edge, Firefox, LibreWolf, Opera, Opera_GX, Safari, and Vivaldi.
+
+   Once logged in via browser cookies, Instaloader saves the session, allowing you to use :option:`--login` in subsequent runs.
+
+   .. versionadded:: 4.11
+
+.. option:: --cookiefile COOKIE-FILE, -B COOKIE-FILE
+
+   Specifies a cookie file path for :option:`--load-cookies` to load cookies from a particular browser profile.
+   This option must be used together with :option:`--load-cookies` and does not work on its own.
+
+   .. versionadded:: 4.11
 
 .. option:: --sessionfile SESSIONFILE, -f SESSIONFILE
 
@@ -239,6 +270,13 @@ How to Download
 
    .. versionadded:: 4.8
 
+.. option:: --sanitize-paths
+
+   Force sanitization of paths so that the resulting file and directory names
+   are valid on both Windows and Unix.
+
+   .. versionadded:: 4.9
+
 .. option:: --resume-prefix prefix
 
    For many targets, Instaloader is capable of resuming a previously-aborted
@@ -251,7 +289,8 @@ How to Download
     - Profile posts,
     - Profile IGTV posts (:option:`--igtv`),
     - Profile tagged posts (:option:`--tagged`),
-    - Saved posts (``:saved``).
+    - Saved posts (``:saved``),
+    - Hashtags.
 
    This feature is enabled by default for targets where it is supported;
    :option:`--resume-prefix` only changes the name of the iterator files.
@@ -273,7 +312,7 @@ How to Download
 .. option:: --user-agent USER_AGENT
 
    User Agent to use for HTTP requests. Per default, Instaloader pretends being
-   Chrome/89 on Linux.
+   Chrome/142 on Linux.
 
 .. option:: --max-connection-attempts N
 
@@ -321,12 +360,13 @@ Miscellaneous Options
    Read arguments from file `args.txt`, a shortcut to provide arguments from
    file rather than command-line. This provides a convenient way to hide login
    info from CLI, and can also be used to simplify management of long arguments.
+   You can provide more than one file at once, e.g.: ``+args1.txt +args2.txt``.
 
    .. note::
 
       Text file should separate arguments with line breaks.
 
-   args.txt example::
+   `args.txt` example::
 
       --login=MYUSERNAME
       --password=MYPASSWORD
